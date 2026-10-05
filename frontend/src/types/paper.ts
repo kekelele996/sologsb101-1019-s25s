@@ -20,11 +20,25 @@ export interface Paper {
   deltaE: number;
   /** 染色配方（v2 迁移时按纸种回填默认值） */
   dyeRecipe: string;
+  /**
+   * 是否为该书叶当前认定采用的补纸。
+   * 一片书叶只留一条采用；新选盖过先前后，旧记录置为 false 并在 replacedBy 写明被哪条替换。
+   */
+  adopted: boolean;
+  /** 被哪条补纸替换（被换时记录新补纸 id），未被换为 null */
+  replacedBy: string | null;
+  /** 认定采用的时间戳，未认定为 null */
+  adoptedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
 
 export type PaperDraft = Omit<Paper, 'id' | 'createdAt' | 'updatedAt'>;
+
+/** 是否为当前认定采用的补纸 */
+export function isAdoptedPaper(paper: Paper): boolean {
+  return paper.adopted === true;
+}
 
 export const PAPER_TYPE_LABEL: Record<PaperType, string> = {
   bamboo: '竹纸',
@@ -70,5 +84,8 @@ export function createEmptyPaperDraft(leafId: string): PaperDraft {
     thicknessMm: 0.06,
     deltaE: 1.5,
     dyeRecipe: DEFAULT_DYE_RECIPE.bamboo,
+    adopted: false,
+    replacedBy: null,
+    adoptedAt: null,
   };
 }

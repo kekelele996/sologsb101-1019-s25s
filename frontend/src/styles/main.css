@@ -148,6 +148,21 @@ body::before {
   border: 1px solid rgba(47, 42, 36, 0.14);
 }
 
+/* 认定采用摘要 */
+.gb-adopt-summary {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(47, 42, 36, 0.04);
+  border: 1px solid rgba(47, 42, 36, 0.08);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.gb-adopt-summary .el-alert {
+  margin: 0;
+}
+
 .gb-paper-card {
   height: 100%;
 }

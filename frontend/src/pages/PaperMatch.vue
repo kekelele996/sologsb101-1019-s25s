@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
  * /papers 补纸选配与染色比对
- * 按 ΔE 排序候选补纸并记录染色配方；ΔE 超阈值时提示重新染色。
+ * 按 ΔE 排序候选补纸并记录染色配方；认定采用补纸（一片叶一条），新选盖过先前并写明被换补纸；
+ * 册次已装订完成时新选挡回；采用补纸被清掉后回到最早候选；领用量按当前染色浓度与纸量重算。
  * 消费 Paper、Leaf；复用 <FilterBar>、<StatBadge>、<EmptyPanel>、<DamageTag>。
  */
 import { computed, reactive, ref, watch } from 'vue'
@@ -11,9 +12,9 @@ import DamageTag from '@/components/common/DamageTag.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar, { useFilterQuery, type FilterModel } from '@/components/common/FilterBar.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
-import { useIdbTable } from '@/hooks/useIdbTable'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
+import { usePaperStore } from '@/stores/paperStore'
 import {
   DEFAULT_DYE_RECIPE,
   DELTA_E_THRESHOLD,
@@ -38,7 +39,7 @@ import {
 
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
-const paperTable = useIdbTable<Paper>((database) => database.papers, { sortByUpdatedAt: false })
+const paperStore = usePaperStore()
 
 const FILTER_KEYS = ['paperType', 'laidPattern'] as const
 const url = useFilterQuery(FILTER_KEYS)
@@ -81,7 +82,7 @@ const rows = computed(() => {
   const keyword = url.keyword.value.trim()
   const types = url.values.value.paperType ?? []
   const patterns = url.values.value.laidPattern ?? []
-  const list = paperTable.rows.value.filter((paper) => {
+  const list = paperStore.papers.filter((paper) => {
     if (keyword.length > 0) {
       const haystack = `${leafLabel(paper.leafId)}${paper.dyeRecipe}${paper.thicknessMm}`
       if (!haystack.includes(keyword)) return false
@@ -102,7 +103,7 @@ const rows = computed(() => {
 })
 
 const stat = computed(() => {
-  const list = paperTable.rows.value
+  const list = paperStore.papers
   const averageDeltaE =
     list.length === 0 ? 0 : Math.round((list.reduce((sum, paper) => sum + paper.deltaE, 0) / list.length) * 100) / 100
   return {
@@ -110,6 +111,7 @@ const stat = computed(() => {
     averageDeltaE,
     redye: list.filter((paper) => needRedye(paper.deltaE)).length,
     coveredLeaves: new Set(list.map((paper) => paper.leafId)).size,
+    adoptedLeaves: new Set(list.filter((paper) => paper.adopted).map((paper) => paper.leafId)).size,
     matchRate:
       list.length === 0
         ? 0
@@ -153,7 +155,10 @@ function openEdit(paper: Paper): void {
     laidPattern: paper.laidPattern,
     thicknessMm: paper.thicknessMm,
     deltaE: paper.deltaE,
-    dyeRecipe: paper.dyeRecipe
+    dyeRecipe: paper.dyeRecipe,
+    adopted: paper.adopted,
+    replacedBy: paper.replacedBy,
+    adoptedAt: paper.adoptedAt
   })
   dialog.value = true
 }
@@ -178,10 +183,10 @@ async function submit(): Promise<void> {
     return
   }
   if (editing.value) {
-    await paperTable.update(editing.value.id, { ...form })
+    await paperStore.updatePaper(editing.value.id, { ...form })
     ElMessage.success('已更新补纸记录')
   } else {
-    await paperTable.create({ ...form }, 'paper')
+    await paperStore.createPaper({ ...form })
     ElMessage.success(needRedye(form.deltaE) ? '已新增补纸，色差超阈值需重新染色' : '已新增补纸记录')
   }
   dialog.value = false
@@ -197,8 +202,49 @@ async function remove(paper: Paper): Promise<void> {
   } catch {
     return
   }
-  await paperTable.remove(paper.id)
-  ElMessage.success('已删除')
+  await paperStore.removePaper(paper.id)
+  ElMessage.success(paper.adopted ? '已删除，采用补纸回到最早候选' : '已删除')
+}
+
+/* ----------------------------- 认定采用 ----------------------------- */
+/** 被换补纸的说明文案：写明被哪条替换 */
+function replacedByLabel(paper: Paper): string {
+  if (!paper.replacedBy) return ''
+  const target = paperStore.papers.find((item) => item.id === paper.replacedBy)
+  if (!target) return '已被替换'
+  return `已被${PAPER_TYPE_LABEL[target.paperType]}补纸替换`
+}
+
+/** 认定某条补纸为采用（盖过先前） */
+async function adoptRow(paper: Paper): Promise<void> {
+  const check = paperStore.adoptionBlocked(paper.leafId)
+  if (check.blocked) {
+    ElMessage.warning(check.reason)
+    return
+  }
+  const current = paperStore.adoptedPaperOfLeaf(paper.leafId)
+  if (current && current.id === paper.id) return
+  try {
+    await ElMessageBox.confirm(
+      current
+        ? `将采用${PAPER_TYPE_LABEL[paper.paperType]}补纸，盖过先前采用的${PAPER_TYPE_LABEL[current.paperType]}补纸（被换补纸将写明替换记录）。`
+        : `将采用${PAPER_TYPE_LABEL[paper.paperType]}补纸为该书叶的认定补纸。`,
+      '认定采用',
+      { type: 'info', confirmButtonText: '确认采用', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await paperStore.adoptPaper(paper.leafId, paper.id)
+    ElMessage.success(
+      current
+        ? `已采用${PAPER_TYPE_LABEL[paper.paperType]}补纸，原${PAPER_TYPE_LABEL[current.paperType]}补纸已被替换`
+        : `已采用${PAPER_TYPE_LABEL[paper.paperType]}补纸`
+    )
+  } catch (err) {
+    ElMessage.warning(err instanceof Error ? err.message : '认定采用失败')
+  }
 }
 
 /* ----------------------------- 候选推荐 ----------------------------- */
@@ -209,7 +255,7 @@ const candidates = computed(() => {
   if (!leaf) return []
   const patterns = ['二指帘纹', '三指帘纹', '细帘纹']
   return PAPER_TYPE_OPTIONS.map((option) => {
-    const paper = paperTable.rows.value.find(
+    const paper = paperStore.papers.find(
       (item) => item.leafId === leaf.id && item.paperType === option.value
     )
     const deltaE = paper ? paper.deltaE : deltaEForLeaf(leaf.damageType, option.value)
@@ -223,7 +269,8 @@ const candidates = computed(() => {
       thicknessMm,
       score: candidateScore({ deltaE, laidPattern, thicknessMm }, '二指帘纹'),
       hasRecord: Boolean(paper),
-      paperId: paper?.id ?? ''
+      paperId: paper?.id ?? '',
+      isAdopted: paper?.adopted ?? false
     }
   }).sort((a, b) => b.score - a.score)
 })
@@ -232,25 +279,47 @@ const candidateLeafPattern = computed(() =>
   candidateLeafId.value ? leafPattern(candidateLeafId.value) : '二指帘纹'
 )
 
-async function selectCandidate(type: PaperType, deltaE: number, laidPatternValue: string, thicknessMm: number): Promise<void> {
+/** 选中书叶的当前采用补纸与领用量 */
+const candidateAdopted = computed(() =>
+  candidateLeafId.value ? paperStore.adoptedPaperOfLeaf(candidateLeafId.value) : undefined
+)
+const candidateRequisition = computed(() =>
+  candidateLeafId.value ? paperStore.requisitionOfAdopted(candidateLeafId.value) : null
+)
+
+async function adoptCandidate(item: (typeof candidates.value)[number]): Promise<void> {
   if (!candidateLeafId.value) return
-  const existing = paperTable.rows.value.find(
-    (item) => item.leafId === candidateLeafId.value && item.paperType === type
-  )
-  const payload: PaperDraft = {
-    leafId: candidateLeafId.value,
-    paperType: type,
-    laidPattern: laidPatternValue,
-    thicknessMm,
-    deltaE,
-    dyeRecipe: DEFAULT_DYE_RECIPE[type]
+  const check = paperStore.adoptionBlocked(candidateLeafId.value)
+  if (check.blocked) {
+    ElMessage.warning(check.reason)
+    return
   }
-  if (existing) {
-    await paperTable.update(existing.id, payload)
-    ElMessage.success(`已更新${PAPER_TYPE_LABEL[type]}候选`)
+  let paperId = item.paperId
+  if (item.hasRecord && paperId) {
+    await paperStore.updatePaper(paperId, {
+      deltaE: item.deltaE,
+      laidPattern: item.laidPattern,
+      thicknessMm: item.thicknessMm
+    })
   } else {
-    await paperTable.create(payload, 'paper')
-    ElMessage.success(`已采用${PAPER_TYPE_LABEL[type]}候选补纸`)
+    const created = await paperStore.createPaper({
+      leafId: candidateLeafId.value,
+      paperType: item.type,
+      laidPattern: item.laidPattern,
+      thicknessMm: item.thicknessMm,
+      deltaE: item.deltaE,
+      dyeRecipe: DEFAULT_DYE_RECIPE[item.type],
+      adopted: false,
+      replacedBy: null,
+      adoptedAt: null
+    })
+    paperId = created.id
+  }
+  try {
+    await paperStore.adoptPaper(candidateLeafId.value, paperId)
+    ElMessage.success(`已采用${PAPER_TYPE_LABEL[item.type]}候选补纸`)
+  } catch (err) {
+    ElMessage.warning(err instanceof Error ? err.message : '认定采用失败')
   }
 }
 
@@ -265,7 +334,7 @@ function deltaTag(deltaE: number): { label: string; color: string } {
       <div>
         <h2>补纸选配与染色比对</h2>
         <p>
-          按 ΔE 升序排列候选补纸（阈值 {{ DELTA_E_THRESHOLD }}），记录帘纹、厚度与染色配方；超阈值会提示重新染色。
+          按 ΔE 升序排列候选补纸（阈值 {{ DELTA_E_THRESHOLD }}），记录帘纹、厚度与染色配方；每叶认定一条采用补纸，新选盖过先前并写明被换补纸。
         </p>
       </div>
       <div class="gb-toolbar">
@@ -283,6 +352,7 @@ function deltaTag(deltaE: number): { label: string; color: string } {
       <StatBadge label="平均 ΔE" :value="stat.averageDeltaE" tone="warning" />
       <StatBadge label="需重新染色" :value="stat.redye" suffix="条" tone="danger" />
       <StatBadge label="覆盖书叶" :value="stat.coveredLeaves" suffix="叶" tone="info" />
+      <StatBadge label="已认定采用" :value="stat.adoptedLeaves" suffix="叶" tone="success" />
       <StatBadge label="ΔE 达标率" :value="`${stat.matchRate}%`" :percent="stat.matchRate" tone="success" />
     </div>
 
@@ -299,9 +369,9 @@ function deltaTag(deltaE: number): { label: string; color: string } {
         <el-card shadow="never">
           <EmptyPanel
             v-if="rows.length === 0"
-            :title="paperTable.rows.value.length === 0 ? '还没有补纸选配记录' : '当前条件下没有记录'"
+            :title="paperStore.papers.length === 0 ? '还没有补纸选配记录' : '当前条件下没有记录'"
             :description="
-              paperTable.rows.value.length === 0
+              paperStore.papers.length === 0
                 ? '为破损书叶选配补纸，记录纸种、帘纹、厚度、色差与染色配方。'
                 : '试着调整纸种或帘纹筛选条件。'
             "
@@ -347,6 +417,13 @@ function deltaTag(deltaE: number): { label: string; color: string } {
                 <div class="gb-muted">{{ row.dyeRecipe }}</div>
               </template>
             </el-table-column>
+            <el-table-column label="采用" width="120">
+              <template #default="{ row }">
+                <el-tag v-if="row.adopted" type="success" effect="dark" size="small" round>已采用</el-tag>
+                <el-button v-else size="small" type="primary" plain @click="adoptRow(row)">采用</el-button>
+                <div v-if="row.replacedBy" class="gb-muted" style="font-size: 11px">{{ replacedByLabel(row) }}</div>
+              </template>
+            </el-table-column>
             <el-table-column label="操作" width="150">
               <template #default="{ row }">
                 <el-button size="small" text :icon="Edit" @click="openEdit(row)">编辑</el-button>
@@ -363,6 +440,25 @@ function deltaTag(deltaE: number): { label: string; color: string } {
           <el-select v-model="candidateLeafId" placeholder="选择需要配纸的书叶" style="width: 100%; margin-bottom: 10px">
             <el-option v-for="item in leafOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
+
+          <div v-if="candidateLeafId" class="gb-adopt-summary">
+            <template v-if="candidateAdopted">
+              <div>
+                当前采用：<strong>{{ PAPER_TYPE_LABEL[candidateAdopted.paperType] }}</strong> 补纸
+                <el-tag size="small" type="success" effect="plain" round style="margin-left: 4px">已认定</el-tag>
+              </div>
+              <div v-if="candidateRequisition" class="gb-muted">
+                领用量：浓度 {{ candidateRequisition.concentration }} × 纸量 {{ candidateRequisition.paperAmount }} cm² =
+                {{ candidateRequisition.amount }}（相对单位）
+              </div>
+            </template>
+            <el-alert
+              v-else
+              type="warning"
+              :closable="false"
+              title="尚未认定采用补纸，装订登记将不放行"
+            />
+          </div>
 
           <EmptyPanel
             v-if="candidates.length === 0"
@@ -389,9 +485,11 @@ function deltaTag(deltaE: number): { label: string; color: string } {
               <el-button
                 size="small"
                 style="margin-top: 6px"
-                @click="selectCandidate(item.type, item.deltaE, item.laidPattern, item.thicknessMm)"
+                :type="item.isAdopted ? 'success' : 'default'"
+                :disabled="item.isAdopted"
+                @click="adoptCandidate(item)"
               >
-                {{ item.hasRecord ? '更新为采用' : '采用该候选' }}
+                {{ item.isAdopted ? '当前采用' : item.hasRecord ? '更新并采用' : '采用该候选' }}
               </el-button>
             </div>
           </div>

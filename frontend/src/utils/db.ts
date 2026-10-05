@@ -17,7 +17,7 @@ import type { Binding } from '@/types/binding'
 export const DB_NAME = 'gbbookrestore'
 
 /** 当前数据结构版本号 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 侧少量元数据键 */
 export const LS_KEYS = {
@@ -122,6 +122,21 @@ export class BookRestoreDatabase extends Dexie {
             if (typeof paper.thicknessMm !== 'number') paper.thicknessMm = 0.06
           })
       })
+    // v3：Paper 增加认定采用字段（adopted / replacedBy / adoptedAt），并为既有档案认定最早候选为采用
+    this.version(3)
+      .stores({
+        books: 'id, title, era, level, collectionNo, updatedAt',
+        volumes: 'id, bookId, volumeNo, bindingType, state, updatedAt',
+        leaves: 'id, volumeId, leafNo, damageType, phValue, state, updatedAt',
+        papers: 'id, leafId, paperType, laidPattern, deltaE, adopted, updatedAt',
+        repairOrders: 'id, leafId, seq, name, operator, state, updatedAt',
+        bindings: 'id, volumeId, method, verdict, finishDate, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        const stored = await tx.table<Paper>('papers').toArray()
+        const normalized = normalizePapers(stored)
+        await tx.table<Paper>('papers').bulkPut(normalized)
+      })
   }
 }
 
@@ -204,11 +219,11 @@ export async function seedDatabase(): Promise<void> {
   ]
 
   const papers: Paper[] = [
-    { id: 'paper_0101', leafId: 'leaf_010101', paperType: 'bamboo', laidPattern: '二指帘纹', thicknessMm: 0.06, deltaE: 1.4, dyeRecipe: DEFAULT_DYE_RECIPE.bamboo, createdAt: now - day * 15, updatedAt: now - day * 15 },
-    { id: 'paper_0102', leafId: 'leaf_010101', paperType: 'bark', laidPattern: '二指帘纹', thicknessMm: 0.07, deltaE: 3.6, dyeRecipe: DEFAULT_DYE_RECIPE.bark, createdAt: now - day * 15, updatedAt: now - day * 15 },
-    { id: 'paper_0103', leafId: 'leaf_010102', paperType: 'xuan', laidPattern: '细帘纹', thicknessMm: 0.05, deltaE: 2.1, dyeRecipe: DEFAULT_DYE_RECIPE.xuan, createdAt: now - day * 12, updatedAt: now - day * 12 },
-    { id: 'paper_0201', leafId: 'leaf_020101', paperType: 'bamboo', laidPattern: '三指帘纹', thicknessMm: 0.06, deltaE: 0.9, dyeRecipe: DEFAULT_DYE_RECIPE.bamboo, createdAt: now - day * 20, updatedAt: now - day * 20 },
-    { id: 'paper_0301', leafId: 'leaf_030101', paperType: 'bark', laidPattern: '二指帘纹', thicknessMm: 0.08, deltaE: 5.2, dyeRecipe: DEFAULT_DYE_RECIPE.bark, createdAt: now - day * 45, updatedAt: now - day * 45 }
+    { id: 'paper_0101', leafId: 'leaf_010101', paperType: 'bamboo', laidPattern: '二指帘纹', thicknessMm: 0.06, deltaE: 1.4, dyeRecipe: DEFAULT_DYE_RECIPE.bamboo, adopted: true, replacedBy: null, adoptedAt: now - day * 15, createdAt: now - day * 15, updatedAt: now - day * 15 },
+    { id: 'paper_0102', leafId: 'leaf_010101', paperType: 'bark', laidPattern: '二指帘纹', thicknessMm: 0.07, deltaE: 3.6, dyeRecipe: DEFAULT_DYE_RECIPE.bark, adopted: false, replacedBy: null, adoptedAt: null, createdAt: now - day * 15, updatedAt: now - day * 15 },
+    { id: 'paper_0103', leafId: 'leaf_010102', paperType: 'xuan', laidPattern: '细帘纹', thicknessMm: 0.05, deltaE: 2.1, dyeRecipe: DEFAULT_DYE_RECIPE.xuan, adopted: true, replacedBy: null, adoptedAt: now - day * 12, createdAt: now - day * 12, updatedAt: now - day * 12 },
+    { id: 'paper_0201', leafId: 'leaf_020101', paperType: 'bamboo', laidPattern: '三指帘纹', thicknessMm: 0.06, deltaE: 0.9, dyeRecipe: DEFAULT_DYE_RECIPE.bamboo, adopted: true, replacedBy: null, adoptedAt: now - day * 20, createdAt: now - day * 20, updatedAt: now - day * 20 },
+    { id: 'paper_0301', leafId: 'leaf_030101', paperType: 'bark', laidPattern: '二指帘纹', thicknessMm: 0.08, deltaE: 5.2, dyeRecipe: DEFAULT_DYE_RECIPE.bark, adopted: true, replacedBy: null, adoptedAt: now - day * 45, createdAt: now - day * 45, updatedAt: now - day * 45 }
   ]
 
   const repairOrders: RepairOrder[] = [
@@ -280,6 +295,36 @@ export async function exportSnapshot(): Promise<RestoreSnapshot> {
   }
 }
 
+/**
+ * 补纸认定字段归一化：
+ * - 补齐 adopted / replacedBy / adoptedAt 字段（兼容 v2 及更早备份）；
+ * - 一片叶若无采用记录，则认定登记最早的一条为采用（采用补纸被清掉后回到最早候选）。
+ */
+export function normalizePapers(papers: Paper[]): Paper[] {
+  const withFields = papers.map((paper) => ({
+    ...paper,
+    adopted: typeof paper.adopted === 'boolean' ? paper.adopted : false,
+    replacedBy: paper.replacedBy === null || typeof paper.replacedBy === 'string' ? paper.replacedBy : null,
+    adoptedAt: paper.adoptedAt === null || typeof paper.adoptedAt === 'number' ? paper.adoptedAt : null
+  }))
+  const adoptedLeafIds = new Set(withFields.filter((paper) => paper.adopted).map((paper) => paper.leafId))
+  const byLeaf = new Map<string, Paper[]>()
+  withFields.forEach((paper) => {
+    if (!byLeaf.has(paper.leafId)) byLeaf.set(paper.leafId, [])
+    byLeaf.get(paper.leafId)!.push(paper)
+  })
+  byLeaf.forEach((list, leafId) => {
+    if (adoptedLeafIds.has(leafId)) return
+    list.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+    const earliest = list[0]
+    if (earliest) {
+      earliest.adopted = true
+      earliest.adoptedAt = earliest.adoptedAt ?? earliest.createdAt
+    }
+  })
+  return withFields
+}
+
 /** 校验导入文件结构，返回错误文案（空串表示通过） */
 export function validateSnapshot(input: unknown): string {
   if (typeof input !== 'object' || input === null) return '文件内容不是合法的 JSON 对象'
@@ -315,7 +360,7 @@ export async function importSnapshot(snapshot: RestoreSnapshot): Promise<void> {
       await db.books.bulkPut(snapshot.books)
       await db.volumes.bulkPut(snapshot.volumes)
       await db.leaves.bulkPut(snapshot.leaves)
-      await db.papers.bulkPut(snapshot.papers)
+      await db.papers.bulkPut(normalizePapers(snapshot.papers))
       await db.repairOrders.bulkPut(snapshot.repairOrders)
       await db.bindings.bulkPut(snapshot.bindings)
     }

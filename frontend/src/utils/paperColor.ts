@@ -85,6 +85,25 @@ export function needRedye(deltaE: number): boolean {
   return deltaE > DELTA_E_THRESHOLD
 }
 
+/**
+ * 染领用量换算：领用量 = 当前染色浓度（ΔE 对应倍率）× 采用补纸的纸量。
+ * 纸量取书叶破损面积（cm²），即采用那条补纸所需覆盖的纸面；浓度按现在的 ΔE 重算。
+ * 返回浓度倍率、纸量与领用量（相对单位，保留一位小数）。
+ */
+export function dyeRequisition(
+  paperType: PaperType,
+  deltaE: number,
+  paperAreaCm2: number
+): { concentration: number; paperAmount: number; amount: number } {
+  const { multiplier } = recipeConcentration(paperType, deltaE, 1)
+  const paperAmount = Math.round(paperAreaCm2 * 10) / 10
+  return {
+    concentration: multiplier,
+    paperAmount,
+    amount: Math.round(multiplier * paperAmount * 10) / 10
+  }
+}
+
 /** 染色配方浓度换算：按目标 ΔE 与纸量给出染料倍率 */
 export function recipeConcentration(
   paperType: PaperType,

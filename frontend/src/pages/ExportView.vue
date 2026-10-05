@@ -14,6 +14,7 @@ import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { usePaperStore } from '@/stores/paperStore'
 import {
   BINDING_METHOD_OPTIONS,
   BINDING_VERDICT_COLOR,
@@ -25,7 +26,6 @@ import {
   type BindingVerdict
 } from '@/types/binding'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL, isVolumeLocked } from '@/types/volume'
-import type { Paper } from '@/types/paper'
 import {
   DB_NAME,
   DB_VERSION,
@@ -48,9 +48,9 @@ import {
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const paperStore = usePaperStore()
 const { totals } = useLeafStats()
 const bindingTable = useIdbTable<Binding>((database) => database.bindings, { sortByUpdatedAt: false })
-const paperTable = useIdbTable<Paper>((database) => database.papers, { sortByUpdatedAt: false })
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const lastBackupAt = ref<string | null>(readLastBackupAt())
@@ -91,7 +91,7 @@ const context = computed(() => ({
   books: bookStore.books,
   volumes: bookStore.volumes,
   leaves: leafStore.leaves,
-  papers: paperTable.rows.value,
+  papers: paperStore.papers,
   repairOrders: repairStore.orders,
   bindings: bindingTable.rows.value
 }))
@@ -102,6 +102,11 @@ const archiveText = computed(() => buildArchiveReport(context.value))
 const dialog = ref(false)
 const editing = ref<Binding | null>(null)
 const form = reactive<BindingDraft>(createEmptyBindingDraft(''))
+
+/** 当前选中册次尚未认定采用补纸的书叶（装订放行检查） */
+const formVolumeMissing = computed(() =>
+  form.volumeId ? paperStore.leavesMissingAdoption(form.volumeId) : []
+)
 
 function openCreate(): void {
   const first = volumeOptions.value[0]
@@ -129,6 +134,13 @@ function openEdit(binding: Binding): void {
 async function submit(): Promise<void> {
   if (!form.volumeId) {
     ElMessage.warning('请选择册次')
+    return
+  }
+  // 装订放行检查：叶子没认定采用补纸，装订登记先不放行
+  const missing = paperStore.leavesMissingAdoption(form.volumeId)
+  if (missing.length > 0) {
+    const label = missing.map((leaf) => `第 ${leaf.leafNo} 叶`).join('、')
+    ElMessage.warning(`该册尚有书叶未认定采用补纸（${label}），装订登记暂不放行`)
     return
   }
   if (editing.value) {
@@ -208,7 +220,13 @@ async function handleFile(event: Event): Promise<void> {
     return
   }
   await importSnapshot(parsed as RestoreSnapshot)
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([
+    bookStore.loadBooks(),
+    bookStore.loadVolumes(),
+    leafStore.loadLeaves(),
+    repairStore.loadOrders(),
+    paperStore.loadPapers()
+  ])
   ElMessage.success('导入完成，数据已覆盖')
 }
 
@@ -223,7 +241,13 @@ async function handleReset(): Promise<void> {
     return
   }
   await resetDatabase()
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([
+    bookStore.loadBooks(),
+    bookStore.loadVolumes(),
+    leafStore.loadLeaves(),
+    repairStore.loadOrders(),
+    paperStore.loadPapers()
+  ])
   ElMessage.success('已清空并重新载入演示数据')
 }
 
@@ -370,6 +394,16 @@ function verdictColor(verdict: string): string {
           <el-input v-model="form.inspector" placeholder="如：程砚" />
         </el-form-item>
       </el-form>
+      <el-alert
+        v-if="formVolumeMissing.length > 0"
+        type="warning"
+        show-icon
+        :closable="false"
+        :title="`尚有 ${formVolumeMissing.length} 叶未认定采用补纸（${formVolumeMissing
+          .map((leaf) => `第 ${leaf.leafNo} 叶`)
+          .join('、')}），装订登记暂不放行`"
+        style="margin-bottom: 12px"
+      />
       <el-alert
         v-if="form.verdict === 'pass'"
         type="success"

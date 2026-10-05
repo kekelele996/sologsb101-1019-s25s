@@ -87,8 +87,9 @@ export function buildArchiveReport(context: ExportContext): string {
       leaves.forEach((leaf) => {
         const orders = context.repairOrders.filter((order) => order.leafId === leaf.id)
         const done = orders.filter((order) => order.state === 'done').length
+        const adopted = context.papers.find((item) => item.leafId === leaf.id && item.adopted)
         lines.push(
-          `      · 第 ${leaf.leafNo} 叶　${DAMAGE_TYPE_LABEL[leaf.damageType]}　${leaf.damageAreaCm2} cm²　pH ${leaf.phValue}　${LEAF_STATE_LABEL[leaf.state]}　工序 ${done}/${orders.length}`
+          `      · 第 ${leaf.leafNo} 叶　${DAMAGE_TYPE_LABEL[leaf.damageType]}　${leaf.damageAreaCm2} cm²　pH ${leaf.phValue}　${LEAF_STATE_LABEL[leaf.state]}　工序 ${done}/${orders.length}　采用补纸：${adopted ? PAPER_TYPE_LABEL[adopted.paperType] : '未认定'}`
         )
       })
     })
@@ -115,6 +116,7 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
     'pH',
     '书叶状态',
     '补纸纸种',
+    '是否采用',
     '帘纹',
     '厚度(mm)',
     '色差ΔE',
@@ -132,7 +134,10 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
         .filter((leaf) => leaf.volumeId === volume.id)
         .sort((a, b) => a.leafNo - b.leafNo)
       leaves.forEach((leaf) => {
-        const paper = context.papers.find((item) => item.leafId === leaf.id)
+        // 优先取认定采用的补纸，其次取该叶任意一条
+        const paper =
+          context.papers.find((item) => item.leafId === leaf.id && item.adopted) ??
+          context.papers.find((item) => item.leafId === leaf.id)
         const orders = context.repairOrders
           .filter((order) => order.leafId === leaf.id)
           .sort((a, b) => a.seq - b.seq)
@@ -148,6 +153,7 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
             leaf.phValue,
             LEAF_STATE_LABEL[leaf.state],
             paper ? PAPER_TYPE_LABEL[paper.paperType] : '未选配',
+            paper ? (paper.adopted ? '是' : '否') : '',
             paper ? paper.laidPattern : '',
             paper ? paper.thicknessMm : '',
             paper ? paper.deltaE : '',
