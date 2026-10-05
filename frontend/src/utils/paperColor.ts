@@ -99,3 +99,17 @@ export function recipeConcentration(
       : `色差 ${deltaE} 在阈值内，按 ${multiplier} 倍浓度微调即可`
   return { recipe, multiplier, note }
 }
+
+/**
+ * 出库领用量（张）：按当前染色浓度倍率与采用条的纸量重算。
+ * 浓度倍率随当前 ΔE 变化，因此领用量始终以「现在的浓度」实时折算，
+ * 避免出库用量与染色单对不上。
+ */
+export function requiredPaperAmount(
+  paperType: PaperType,
+  deltaE: number,
+  paperAmount: number
+): number {
+  const multiplier = recipeConcentration(paperType, deltaE, paperAmount).multiplier
+  return Math.round(paperAmount * multiplier * 10) / 10
+}

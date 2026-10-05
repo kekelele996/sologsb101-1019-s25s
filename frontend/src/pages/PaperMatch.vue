@@ -28,12 +28,21 @@ import {
 } from '@/types/paper'
 import { DAMAGE_TYPE_LABEL } from '@/types/leaf'
 import {
+  PaperAdoptionBlockedError,
+  adoptedPaperOfLeaf,
+  adoptPaper,
+  isLeafVolumeLocked,
+  paperLabel,
+  removePaperRecord
+} from '@/utils/paperAdoption'
+import {
   PAPER_BASE_COLOR,
   candidateScore,
   deltaEForLeaf,
   laidPatternMatch,
   needRedye,
-  recipeConcentration
+  recipeConcentration,
+  requiredPaperAmount
 } from '@/utils/paperColor'
 
 const bookStore = useBookStore()
@@ -75,6 +84,21 @@ function leafPattern(leafId: string): string {
   const leaf = leafStore.leafById(leafId)
   if (!leaf) return '二指帘纹'
   return leaf.damageType === 'stain' ? '细帘纹' : '二指帘纹'
+}
+
+/** 叶子所在册次是否已装订锁定（锁定时候选只读、认定一律挡回） */
+function leafLocked(leafId: string): boolean {
+  return isLeafVolumeLocked(leafStore.leafById(leafId), bookStore.volumes)
+}
+
+/** 一片叶子当前认定的采用条 */
+function adoptedOf(leafId: string): Paper | undefined {
+  return adoptedPaperOfLeaf(paperTable.rows.value, leafId)
+}
+
+/** 按当前染色浓度与采用条纸量重算的出库领用量（张） */
+function requiredAmount(paper: Paper): number {
+  return requiredPaperAmount(paper.paperType, paper.deltaE, paper.paperAmount)
 }
 
 const rows = computed(() => {
@@ -146,6 +170,10 @@ function openCreate(): void {
 }
 
 function openEdit(paper: Paper): void {
+  if (leafLocked(paper.leafId)) {
+    ElMessage.warning('该书叶所在册次已装订，补纸记录整册只读')
+    return
+  }
   editing.value = paper
   Object.assign(form, {
     leafId: paper.leafId,
@@ -153,7 +181,8 @@ function openEdit(paper: Paper): void {
     laidPattern: paper.laidPattern,
     thicknessMm: paper.thicknessMm,
     deltaE: paper.deltaE,
-    dyeRecipe: paper.dyeRecipe
+    dyeRecipe: paper.dyeRecipe,
+    paperAmount: paper.paperAmount
   })
   dialog.value = true
 }
@@ -169,40 +198,100 @@ watch(
   }
 )
 
-const recipePreview = computed(() => recipeConcentration(form.paperType, form.deltaE, 1))
+const recipePreview = computed(() => recipeConcentration(form.paperType, form.deltaE, form.paperAmount))
 const formMatch = computed(() => laidPatternMatch(form.laidPattern, '二指帘纹'))
+const formRequiredAmount = computed(() => requiredPaperAmount(form.paperType, form.deltaE, form.paperAmount))
 
 async function submit(): Promise<void> {
   if (!form.leafId) {
     ElMessage.warning('请选择关联书叶')
     return
   }
+  if (leafLocked(form.leafId)) {
+    ElMessage.warning('该书叶所在册次已装订，候选补纸整册只读')
+    return
+  }
   if (editing.value) {
     await paperTable.update(editing.value.id, { ...form })
     ElMessage.success('已更新补纸记录')
   } else {
-    await paperTable.create({ ...form }, 'paper')
-    ElMessage.success(needRedye(form.deltaE) ? '已新增补纸，色差超阈值需重新染色' : '已新增补纸记录')
+    // 手工新增仅登记候选；认定唯一采用由「认定采用」动作完成
+    await paperTable.create(
+      {
+        ...form,
+        adopted: false,
+        adoptedAt: null,
+        replacedPaperId: null,
+        replacedPaperLabel: null
+      },
+      'paper'
+    )
+    ElMessage.success(needRedye(form.deltaE) ? '已新增补纸，色差超阈值需重新染色' : '已新增补纸记录（尚未认定采用）')
   }
   dialog.value = false
 }
 
-async function remove(paper: Paper): Promise<void> {
+/** 认定某条候选为该书叶唯一采用；已装订册次挡回；换选写明被换下条目 */
+async function adopt(paper: Paper): Promise<void> {
+  if (leafLocked(paper.leafId)) {
+    ElMessage.warning('该书叶所在册次已装订，认定以册次状态为准，不能改选补纸')
+    return
+  }
   try {
-    await ElMessageBox.confirm('将删除该补纸选配记录。', '删除补纸', {
-      type: 'warning',
-      confirmButtonText: '确认删除',
-      cancelButtonText: '取消'
-    })
+    const result = await adoptPaper(paper.id)
+    if (paper.adopted) {
+      ElMessage.info('该候选已是本片书叶的采用补纸')
+    } else if (result.previous && result.replacedLabel) {
+      ElMessage.success(`已换选：当前采用 ${paperLabel(result.adopted)}，换下 ${result.replacedLabel}`)
+    } else {
+      ElMessage.success(`已认定采用 ${paperLabel(result.adopted)}`)
+    }
+  } catch (err) {
+    if (err instanceof PaperAdoptionBlockedError) {
+      ElMessage.warning(err.message)
+      return
+    }
+    throw err
+  }
+}
+
+async function adoptById(paperId: string): Promise<void> {
+  const paper = paperTable.rows.value.find((item) => item.id === paperId)
+  if (paper) await adopt(paper)
+}
+
+async function remove(paper: Paper): Promise<void> {
+  if (leafLocked(paper.leafId)) {
+    ElMessage.warning('该书叶所在册次已装订，补纸记录整册只读，不能删除')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      paper.adopted ? '该条是当前采用补纸，删除后将自动回到本片书叶最早登记的候选。' : '将删除该补纸选配记录。',
+      '删除补纸',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消'
+      }
+    )
   } catch {
     return
   }
-  await paperTable.remove(paper.id)
-  ElMessage.success('已删除')
+  const { fellBackTo } = await removePaperRecord(paper.id)
+  if (fellBackTo) {
+    ElMessage.success(`已删除，并自动回到最早候选：${paperLabel(fellBackTo)}`)
+  } else if (paper.adopted) {
+    ElMessage.success('已删除采用条，本片书叶已无候选，请重新配纸')
+  } else {
+    ElMessage.success('已删除')
+  }
 }
 
 /* ----------------------------- 候选推荐 ----------------------------- */
 const candidateLeafId = ref('')
+const candidateLocked = computed(() => (candidateLeafId.value ? leafLocked(candidateLeafId.value) : false))
+const candidateAdopted = computed(() => (candidateLeafId.value ? adoptedOf(candidateLeafId.value) : undefined))
 const candidates = computed(() => {
   if (!candidateLeafId.value) return []
   const leaf = leafStore.leafById(candidateLeafId.value)
@@ -223,7 +312,9 @@ const candidates = computed(() => {
       thicknessMm,
       score: candidateScore({ deltaE, laidPattern, thicknessMm }, '二指帘纹'),
       hasRecord: Boolean(paper),
-      paperId: paper?.id ?? ''
+      paperId: paper?.id ?? '',
+      adopted: paper?.adopted ?? false,
+      replacedPaperLabel: paper?.replacedPaperLabel ?? null
     }
   }).sort((a, b) => b.score - a.score)
 })
@@ -232,8 +323,13 @@ const candidateLeafPattern = computed(() =>
   candidateLeafId.value ? leafPattern(candidateLeafId.value) : '二指帘纹'
 )
 
+/** 候选推荐卡片只负责登记 / 更新候选记录；认定唯一采用由 adopt() 完成 */
 async function selectCandidate(type: PaperType, deltaE: number, laidPatternValue: string, thicknessMm: number): Promise<void> {
   if (!candidateLeafId.value) return
+  if (candidateLocked.value) {
+    ElMessage.warning('该书叶所在册次已装订，候选补纸整册只读')
+    return
+  }
   const existing = paperTable.rows.value.find(
     (item) => item.leafId === candidateLeafId.value && item.paperType === type
   )
@@ -243,14 +339,18 @@ async function selectCandidate(type: PaperType, deltaE: number, laidPatternValue
     laidPattern: laidPatternValue,
     thicknessMm,
     deltaE,
-    dyeRecipe: DEFAULT_DYE_RECIPE[type]
+    dyeRecipe: DEFAULT_DYE_RECIPE[type],
+    paperAmount: existing?.paperAmount ?? 1
   }
   if (existing) {
     await paperTable.update(existing.id, payload)
     ElMessage.success(`已更新${PAPER_TYPE_LABEL[type]}候选`)
   } else {
-    await paperTable.create(payload, 'paper')
-    ElMessage.success(`已采用${PAPER_TYPE_LABEL[type]}候选补纸`)
+    await paperTable.create(
+      { ...payload, adopted: false, adoptedAt: null, replacedPaperId: null, replacedPaperLabel: null },
+      'paper'
+    )
+    ElMessage.success(`已登记${PAPER_TYPE_LABEL[type]}候选，请在列表中「认定采用」`)
   }
 }
 
@@ -341,16 +441,37 @@ function deltaTag(deltaE: number): { label: string; color: string } {
             <el-table-column label="综合评分" width="100">
               <template #default="{ row }">{{ candidateScore(row, leafPattern(row.leafId)) }}</template>
             </el-table-column>
+            <el-table-column label="认定 / 领用" width="210">
+              <template #default="{ row }">
+                <el-tag v-if="row.adopted" type="success" effect="dark" size="small" round>采用中</el-tag>
+                <el-tag v-else type="info" effect="plain" size="small" round>候选</el-tag>
+                <div class="gb-muted">纸量 {{ row.paperAmount }} 张 · 领用量 {{ requiredAmount(row) }} 张</div>
+                <div v-if="row.replacedPaperLabel" class="gb-muted" style="color: #d68910">
+                  换下：{{ row.replacedPaperLabel }}
+                </div>
+              </template>
+            </el-table-column>
             <el-table-column label="染色配方" min-width="200">
               <template #default="{ row }">
                 <el-tag v-if="needRedye(row.deltaE)" type="danger" effect="plain" size="small" round>需重新染色</el-tag>
                 <div class="gb-muted">{{ row.dyeRecipe }}</div>
+                <div class="gb-muted">
+                  当前 {{ recipeConcentration(row.paperType, row.deltaE, row.paperAmount).multiplier }} 倍浓度
+                </div>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="150">
+            <el-table-column label="操作" width="220">
               <template #default="{ row }">
-                <el-button size="small" text :icon="Edit" @click="openEdit(row)">编辑</el-button>
-                <el-button size="small" text type="danger" :icon="Delete" @click="remove(row)">删除</el-button>
+                <el-button
+                  size="small"
+                  :type="row.adopted ? 'success' : 'primary'"
+                  :disabled="row.adopted || leafLocked(row.leafId)"
+                  @click="adopt(row)"
+                >
+                  {{ row.adopted ? '已采用' : '认定采用' }}
+                </el-button>
+                <el-button size="small" text :icon="Edit" :disabled="leafLocked(row.leafId)" @click="openEdit(row)">编辑</el-button>
+                <el-button size="small" text type="danger" :icon="Delete" :disabled="leafLocked(row.leafId)" @click="remove(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -363,6 +484,34 @@ function deltaTag(deltaE: number): { label: string; color: string } {
           <el-select v-model="candidateLeafId" placeholder="选择需要配纸的书叶" style="width: 100%; margin-bottom: 10px">
             <el-option v-for="item in leafOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
+
+          <el-alert
+            v-if="candidateLocked"
+            type="warning"
+            show-icon
+            :closable="false"
+            style="margin-bottom: 10px"
+            title="该片书叶所在册次已装订"
+            description="认定以册次状态为准，候选补纸整册只读，不能新选或改选。"
+          />
+          <el-alert
+            v-else-if="candidateAdopted"
+            type="success"
+            show-icon
+            :closable="false"
+            style="margin-bottom: 10px"
+            :title="`已认定采用：${paperLabel(candidateAdopted)}`"
+            :description="candidateAdopted.replacedPaperLabel ? `此前换下：${candidateAdopted.replacedPaperLabel}` : '一片叶子只留一条采用；改选其他候选会盖过当前采用并留痕。'"
+          />
+          <el-alert
+            v-else-if="candidateLeafId"
+            type="info"
+            show-icon
+            :closable="false"
+            style="margin-bottom: 10px"
+            title="该片书叶尚未认定采用补纸"
+            description="请登记候选后点击「认定采用」；未认定的书叶装订登记将不放行。"
+          />
 
           <EmptyPanel
             v-if="candidates.length === 0"
@@ -377,6 +526,7 @@ function deltaTag(deltaE: number): { label: string; color: string } {
                 <div>
                   <strong>{{ item.label }}</strong>
                   <span class="gb-muted"> · 评分 {{ item.score }}</span>
+                  <el-tag v-if="item.adopted" type="success" effect="dark" size="small" round style="margin-left: 6px">采用中</el-tag>
                 </div>
                 <el-tag :type="needRedye(item.deltaE) ? 'danger' : 'success'" effect="plain" size="small" round>
                   ΔE {{ item.deltaE }}
@@ -386,13 +536,22 @@ function deltaTag(deltaE: number): { label: string; color: string } {
                 帘纹 {{ item.laidPattern }}（匹配 {{ laidPatternMatch(item.laidPattern, candidateLeafPattern) }}%）· 厚度
                 {{ item.thicknessMm }}mm · {{ item.hasRecord ? '已有登记' : '尚无登记（按基准色估算）' }}
               </div>
-              <el-button
-                size="small"
-                style="margin-top: 6px"
-                @click="selectCandidate(item.type, item.deltaE, item.laidPattern, item.thicknessMm)"
-              >
-                {{ item.hasRecord ? '更新为采用' : '采用该候选' }}
-              </el-button>
+              <div v-if="item.adopted && item.replacedPaperLabel" class="gb-muted" style="color: #d68910">
+                换下：{{ item.replacedPaperLabel }}
+              </div>
+              <div style="display: flex; gap: 8px; margin-top: 6px">
+                <el-button
+                  size="small"
+                  :type="item.adopted ? 'success' : 'primary'"
+                  :disabled="item.adopted || candidateLocked || !item.hasRecord"
+                  @click="item.hasRecord && adoptById(item.paperId)"
+                >
+                  {{ item.adopted ? '已采用' : '认定采用' }}
+                </el-button>
+                <el-button size="small" :disabled="candidateLocked" @click="selectCandidate(item.type, item.deltaE, item.laidPattern, item.thicknessMm)">
+                  {{ item.hasRecord ? '更新候选' : '登记候选' }}
+                </el-button>
+              </div>
             </div>
           </div>
         </el-card>
@@ -419,6 +578,12 @@ function deltaTag(deltaE: number): { label: string; color: string } {
         </el-form-item>
         <el-form-item label="厚度(mm)">
           <el-input-number v-model="form.thicknessMm" :min="0.01" :max="0.5" :step="0.01" :precision="2" />
+        </el-form-item>
+        <el-form-item label="纸量(张)">
+          <el-input-number v-model="form.paperAmount" :min="0.5" :max="50" :step="0.5" :precision="1" />
+          <span class="gb-muted" style="margin-left: 8px">
+            按当前染色浓度 {{ recipePreview.multiplier }} 倍，领用量 {{ formRequiredAmount }} 张
+          </span>
         </el-form-item>
         <el-form-item label="色差 ΔE">
           <el-input-number v-model="form.deltaE" :min="0" :max="20" :step="0.1" :precision="1" />

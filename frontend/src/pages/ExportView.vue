@@ -26,6 +26,7 @@ import {
 } from '@/types/binding'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL, isVolumeLocked } from '@/types/volume'
 import type { Paper } from '@/types/paper'
+import { unadoptedLeafNos } from '@/utils/paperAdoption'
 import {
   DB_NAME,
   DB_VERSION,
@@ -71,6 +72,20 @@ function volumeLabel(volumeId: string): string {
   const book = bookStore.bookById(volume.bookId)
   return `${book ? `《${book.title}》` : ''}第 ${volume.volumeNo} 册`
 }
+
+/** 装订门禁：当前表单所选册次中尚未认定采用补纸的叶号（合格登记不放行） */
+const pendingAdoptLeafNos = computed<number[]>(() =>
+  form.volumeId ? unadoptedLeafNos(form.volumeId, leafStore.leaves, paperTable.rows.value) : []
+)
+
+/** 册次选项附带的未认定叶号，供下拉里提示 */
+const volumeGateMap = computed<Record<string, number[]>>(() => {
+  const result: Record<string, number[]> = {}
+  bookStore.volumes.forEach((volume) => {
+    result[volume.id] = unadoptedLeafNos(volume.id, leafStore.leaves, paperTable.rows.value)
+  })
+  return result
+})
 
 const stat = computed(() => {
   const list = bindingTable.rows.value
@@ -130,6 +145,14 @@ async function submit(): Promise<void> {
   if (!form.volumeId) {
     ElMessage.warning('请选择册次')
     return
+  }
+  // 叶子没认定采用补纸，装订登记先不放行（返修登记不触发归档，不受此限）
+  if (form.verdict === 'pass') {
+    const missing = unadoptedLeafNos(form.volumeId, leafStore.leaves, paperTable.rows.value)
+    if (missing.length > 0) {
+      ElMessage.error(`第 ${volumeLabel(form.volumeId)} 以下书叶尚未认定采用补纸，装订登记暂不放行：第 ${missing.join('、')} 叶`)
+      return
+    }
   }
   if (editing.value) {
     await bindingTable.update(editing.value.id, { ...form })
@@ -350,7 +373,16 @@ function verdictColor(verdict: string): string {
       <el-form label-width="100px">
         <el-form-item label="册次" required>
           <el-select v-model="form.volumeId" style="width: 100%">
-            <el-option v-for="item in volumeOptions" :key="item.value" :label="item.label" :value="item.value" />
+            <el-option
+              v-for="item in volumeOptions"
+              :key="item.value"
+              :label="
+                volumeGateMap[item.value]?.length
+                  ? `${item.label}（第 ${volumeGateMap[item.value].join('、')} 叶未认定补纸）`
+                  : item.label
+              "
+              :value="item.value"
+            />
           </el-select>
         </el-form-item>
         <el-form-item label="装订方式" required>
@@ -371,7 +403,16 @@ function verdictColor(verdict: string): string {
         </el-form-item>
       </el-form>
       <el-alert
-        v-if="form.verdict === 'pass'"
+        v-if="form.verdict === 'pass' && pendingAdoptLeafNos.length > 0"
+        type="error"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 12px"
+        title="装订登记暂不放行"
+        :description="`该册第 ${pendingAdoptLeafNos.join('、')} 叶尚未认定采用补纸，请先到「补纸选配」页逐叶认定（一片叶子只留一条采用）。`"
+      />
+      <el-alert
+        v-if="form.verdict === 'pass' && pendingAdoptLeafNos.length === 0"
         type="success"
         show-icon
         :closable="false"

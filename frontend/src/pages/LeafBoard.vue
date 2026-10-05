@@ -30,6 +30,8 @@ import {
   type LeafState
 } from '@/types/leaf'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL, isVolumeLocked } from '@/types/volume'
+import { adoptedPaperOfLeaf } from '@/utils/paperAdoption'
+import { requiredPaperAmount } from '@/utils/paperColor'
 import { useRepairStore } from '@/stores/repairStore'
 
 const route = useRoute()
@@ -193,11 +195,11 @@ async function addLeafRecord(leaf: Leaf): Promise<void> {
   ElMessage.info(`同一叶号可叠加多种破损：已带出第 ${leaf.leafNo} 叶`)
 }
 
-/** 该叶已选配的补纸文案（补纸选配页维护） */
+/** 该叶已认定的采用补纸文案（补纸选配页维护）；未认定时明确提示 */
 function paperText(leafId: string): string {
-  const paper = paperTable.rows.value.find((item) => item.leafId === leafId)
-  if (!paper) return '未选配'
-  return `${PAPER_TYPE_LABEL[paper.paperType]} · ΔE ${paper.deltaE}`
+  const paper = adoptedPaperOfLeaf(paperTable.rows.value, leafId)
+  if (!paper) return '未认定采用'
+  return `${PAPER_TYPE_LABEL[paper.paperType]} · ΔE ${paper.deltaE} · 领用量 ${requiredPaperAmount(paper.paperType, paper.deltaE, paper.paperAmount)} 张`
 }
 
 function phTag(ph: number): { label: string; color: string } {

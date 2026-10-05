@@ -29,6 +29,8 @@ import {
   type RepairOrderDraft
 } from '@/types/repairOrder'
 import { PAPER_TYPE_LABEL, type Paper } from '@/types/paper'
+import { adoptedPaperOfLeaf } from '@/utils/paperAdoption'
+import { requiredPaperAmount } from '@/utils/paperColor'
 
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
@@ -64,7 +66,7 @@ watch(
 
 const currentLeaf = computed(() => (currentLeafId.value ? leafStore.leafById(currentLeafId.value) : undefined))
 const currentPaper = computed(() =>
-  currentLeafId.value ? paperTable.rows.value.find((paper) => paper.leafId === currentLeafId.value) : undefined
+  currentLeafId.value ? adoptedPaperOfLeaf(paperTable.rows.value, currentLeafId.value) : undefined
 )
 
 const filterModel = computed<FilterModel>(() => ({
@@ -289,9 +291,10 @@ watchEffect(() => {
         <DamageTag :type="currentLeaf.damageType" :note="`${currentLeaf.damageAreaCm2} cm²`" />
         <el-tag effect="plain" round>pH {{ currentLeaf.phValue }}</el-tag>
         <el-tag v-if="currentPaper" type="success" effect="plain" round>
-          补纸：{{ PAPER_TYPE_LABEL[currentPaper.paperType] }} · ΔE {{ currentPaper.deltaE }}
+          采用补纸：{{ PAPER_TYPE_LABEL[currentPaper.paperType] }} · ΔE {{ currentPaper.deltaE }} · 领用量
+          {{ requiredPaperAmount(currentPaper.paperType, currentPaper.deltaE, currentPaper.paperAmount) }} 张
         </el-tag>
-        <el-tag v-else type="warning" effect="plain" round>尚未选配补纸</el-tag>
+        <el-tag v-else type="warning" effect="plain" round>尚未认定采用补纸</el-tag>
       </div>
     </el-card>
 

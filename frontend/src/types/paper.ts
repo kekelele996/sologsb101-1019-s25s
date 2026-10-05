@@ -20,11 +20,25 @@ export interface Paper {
   deltaE: number;
   /** 染色配方（v2 迁移时按纸种回填默认值） */
   dyeRecipe: string;
+  /** 纸量（张）：该片书叶按此条补纸领取的张数，领用量再按染色浓度倍率重算（v3） */
+  paperAmount: number;
+  /** 是否为修复师认定的该片书叶唯一采用补纸（一片叶子只留一条采用，v3） */
+  adopted: boolean;
+  /** 认定采用的时间戳（未认定为 null，v3） */
+  adoptedAt: number | null;
+  /** 换选时被换下条目的 id（仅记录在当前采用条上，未换选为 null，v3） */
+  replacedPaperId: string | null;
+  /** 换选时被换下条目的可读快照，如「皮纸（二指帘纹·0.07mm·ΔE 3.6）」（v3） */
+  replacedPaperLabel: string | null;
   createdAt: number;
   updatedAt: number;
 }
 
-export type PaperDraft = Omit<Paper, 'id' | 'createdAt' | 'updatedAt'>;
+/** 表单草稿：认定状态与换选痕迹由认定领域服务维护，不进手工表单 */
+export type PaperDraft = Omit<
+  Paper,
+  'id' | 'createdAt' | 'updatedAt' | 'adopted' | 'adoptedAt' | 'replacedPaperId' | 'replacedPaperLabel'
+>;
 
 export const PAPER_TYPE_LABEL: Record<PaperType, string> = {
   bamboo: '竹纸',
@@ -70,5 +84,6 @@ export function createEmptyPaperDraft(leafId: string): PaperDraft {
     thicknessMm: 0.06,
     deltaE: 1.5,
     dyeRecipe: DEFAULT_DYE_RECIPE.bamboo,
+    paperAmount: 1
   };
 }

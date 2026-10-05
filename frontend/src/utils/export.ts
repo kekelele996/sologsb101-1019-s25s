@@ -12,6 +12,8 @@ import { BOOK_LEVEL_LABEL } from '@/types/book'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL } from '@/types/volume'
 import { DAMAGE_TYPE_LABEL, LEAF_STATE_LABEL } from '@/types/leaf'
 import { PAPER_TYPE_LABEL, deltaELevel } from '@/types/paper'
+import { adoptedPaperOfLeaf, paperLabel } from './paperAdoption'
+import { requiredPaperAmount } from './paperColor'
 import { REPAIR_NAME_LABEL } from '@/types/repairOrder'
 import { BINDING_VERDICT_LABEL } from '@/types/binding'
 import type { RestoreSnapshot } from './db'
@@ -87,9 +89,14 @@ export function buildArchiveReport(context: ExportContext): string {
       leaves.forEach((leaf) => {
         const orders = context.repairOrders.filter((order) => order.leafId === leaf.id)
         const done = orders.filter((order) => order.state === 'done').length
+        const adopted = adoptedPaperOfLeaf(context.papers, leaf.id)
+        const paperText = adopted
+          ? `采用 ${paperLabel(adopted)}　纸量 ${adopted.paperAmount} 张　领用量 ${requiredPaperAmount(adopted.paperType, adopted.deltaE, adopted.paperAmount)} 张${adopted.replacedPaperLabel ? `　换下 ${adopted.replacedPaperLabel}` : ''}`
+          : '未认定采用补纸'
         lines.push(
           `      · 第 ${leaf.leafNo} 叶　${DAMAGE_TYPE_LABEL[leaf.damageType]}　${leaf.damageAreaCm2} cm²　pH ${leaf.phValue}　${LEAF_STATE_LABEL[leaf.state]}　工序 ${done}/${orders.length}`
         )
+        lines.push(`          补纸：${paperText}`)
       })
     })
     lines.push('')
@@ -114,11 +121,15 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
     '面积(cm²)',
     'pH',
     '书叶状态',
-    '补纸纸种',
+    '是否认定采用',
+    '采用补纸',
     '帘纹',
     '厚度(mm)',
     '色差ΔE',
     'ΔE判定',
+    '纸量(张)',
+    '领用量(张)',
+    '换下条目',
     '染色配方',
     '工序进度',
     '最近工序',
@@ -132,7 +143,7 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
         .filter((leaf) => leaf.volumeId === volume.id)
         .sort((a, b) => a.leafNo - b.leafNo)
       leaves.forEach((leaf) => {
-        const paper = context.papers.find((item) => item.leafId === leaf.id)
+        const paper = adoptedPaperOfLeaf(context.papers, leaf.id)
         const orders = context.repairOrders
           .filter((order) => order.leafId === leaf.id)
           .sort((a, b) => a.seq - b.seq)
@@ -147,11 +158,15 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
             leaf.damageAreaCm2,
             leaf.phValue,
             LEAF_STATE_LABEL[leaf.state],
-            paper ? PAPER_TYPE_LABEL[paper.paperType] : '未选配',
+            paper ? '已认定' : '未认定',
+            paper ? PAPER_TYPE_LABEL[paper.paperType] : '',
             paper ? paper.laidPattern : '',
             paper ? paper.thicknessMm : '',
             paper ? paper.deltaE : '',
             paper ? deltaELevel(paper.deltaE).label : '',
+            paper ? paper.paperAmount : '',
+            paper ? requiredPaperAmount(paper.paperType, paper.deltaE, paper.paperAmount) : '',
+            paper?.replacedPaperLabel ?? '',
             paper ? paper.dyeRecipe : '',
             `${done}/${orders.length}`,
             last ? REPAIR_NAME_LABEL[last.name] : '',
